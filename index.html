@@ -238,6 +238,7 @@ let translateOn = true, exported = true;
 let ws = null, stream = null, audioCtx = null, node = null, wakeLock = null;
 let testing = false, streaming = false;
 let ticker = null, startedAt = 0, elapsedBase = 0, saveTimer = null;
+let captureRate = RATE, laggy = false;
 
 // --- persistence -------------------------------------------------------------
 
@@ -425,27 +426,56 @@ const autoscroll = () => { if (following) $("main").scrollTop = $("main").scroll
 // --- audio -------------------------------------------------------------------
 
 const WORKLET = `
+// Downsamples to 16 kHz here rather than shipping whatever the hardware runs at.
+// A phone that refuses a 16 kHz context hands back 48 kHz, and sending that raw
+// is three times the uplink for audio Soniox gains nothing from — 16 kHz already
+// covers speech. On a phone that cannot sustain the larger stream the socket's
+// send queue grows and never drains, which is heard as a delay that creeps up
+// over a meeting rather than a constant lag.
+//
+// Each output sample is the mean of the input samples falling inside its window.
+// At the usual 3:1 that doubles as the anti-alias filter that plain decimation
+// would skip; at an awkward ratio the window simply straddles samples.
 class Tap extends AudioWorkletProcessor {
-  constructor() { super(); this.buf = []; this.target = Math.round(sampleRate * 0.12); }
+  constructor(options) {
+    super();
+    this.rate = options.processorOptions.rate;
+    this.step = sampleRate / this.rate;
+    this.sum = 0; this.n = 0; this.due = this.step;
+    this.buf = []; this.held = 0;
+    this.target = Math.round(this.rate * 0.12);
+    this.told = 0;
+  }
   process(inputs) {
     const ch = inputs[0][0];
     if (!ch) return true;
     let peak = 0;
-    const pcm = new Int16Array(ch.length);
+    const out = new Int16Array(Math.ceil(ch.length / this.step) + 1);
+    let k = 0;
     for (let i = 0; i < ch.length; i++) {
-      const s = Math.max(-1, Math.min(1, ch[i]));
-      if (s > peak) peak = s; else if (-s > peak) peak = -s;
-      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      const v = ch[i];
+      const a = v < 0 ? -v : v;
+      if (a > peak) peak = a;
+      this.sum += v; this.n++;
+      if (--this.due <= 0) {
+        const m = Math.max(-1, Math.min(1, this.sum / this.n));
+        out[k++] = m < 0 ? m * 0x8000 : m * 0x7fff;
+        this.sum = 0; this.n = 0; this.due += this.step;
+      }
     }
-    this.buf.push(pcm);
-    let held = this.buf.reduce((n, a) => n + a.length, 0);
-    if (held >= this.target) {
-      const out = new Int16Array(held);
+    if (k) { this.buf.push(out.subarray(0, k)); this.held += k; }
+
+    if (this.held >= this.target) {
+      const chunk = new Int16Array(this.held);
       let at = 0;
-      for (const a of this.buf) { out.set(a, at); at += a.length; }
-      this.buf = [];
-      this.port.postMessage({ pcm: out, peak }, [out.buffer]);
-    } else {
+      for (const part of this.buf) { chunk.set(part, at); at += part.length; }
+      this.buf = []; this.held = 0;
+      this.told = currentTime;
+      this.port.postMessage({ pcm: chunk, peak }, [chunk.buffer]);
+    } else if (currentTime - this.told > 0.05) {
+      // The level bar only needs to look alive. One message per 128-sample
+      // quantum is 375 a second at 48 kHz, each one writing to the DOM.
+      this.told = currentTime;
       this.port.postMessage({ peak });
     }
     return true;
@@ -518,13 +548,29 @@ async function openAudio() {
   await audioCtx.audioWorklet.addModule(url);
   URL.revokeObjectURL(url);
 
-  node = new AudioWorkletNode(audioCtx, "tap");
+  // 16 kHz unless the hardware genuinely runs slower, which nothing does.
+  captureRate = Math.min(RATE, audioCtx.sampleRate);
+  node = new AudioWorkletNode(audioCtx, "tap", { processorOptions: { rate: captureRate } });
   node.port.onmessage = (e) => {
     const fill = $("meterFill");
     const peak = e.data.peak || 0;
     fill.style.width = Math.min(100, Math.pow(peak, 0.5) * 108) + "%";
     fill.className = "fill" + (peak > 0.9 ? " hot" : "");
-    if (streaming && e.data.pcm && ws && ws.readyState === 1) ws.send(e.data.pcm.buffer);
+    if (!(streaming && e.data.pcm && ws && ws.readyState === 1)) return;
+
+    // What has been handed to the socket but not yet put on the wire. If this
+    // keeps growing the uplink cannot carry the stream, and every word arrives
+    // later than the one before it — a delay that builds instead of settling.
+    // Say so, because from the transcript alone it reads as a slow server.
+    const backlog = ws.bufferedAmount / (captureRate * 2);
+    if (backlog > 2 && !laggy) {
+      laggy = true;
+      show("업로드가 음성 속도를 못 따라갑니다. 전사가 점점 늦어집니다 — 신호가 약하거나 회선이 느린 상태입니다.");
+    } else if (backlog < 0.5 && laggy) {
+      laggy = false;
+      show(null);
+    }
+    ws.send(e.data.pcm.buffer);
   };
   audioCtx.createMediaStreamSource(stream).connect(node);
   // A worklet needs a downstream node to be pulled, but the audio must not be
@@ -577,10 +623,9 @@ function buildConfig() {
     api_key: apiKey,
     model: MODEL,
     audio_format: "pcm_s16le",
-    // The rate the context actually got, not the rate asked for: a phone may
-    // refuse 16 kHz and hand back its native 48 kHz. Declaring 16 kHz then would
-    // play the audio back at a third speed on the server and wreck recognition.
-    sample_rate: audioCtx ? audioCtx.sampleRate : RATE,
+    // What the worklet actually emits. It resamples, so this is 16 kHz whatever
+    // rate the phone's hardware decided to run at.
+    sample_rate: captureRate,
     num_channels: 1,
     enable_speaker_diarization: true,
     // Deliberately off: the docs state endpoint detection "force[s] tokens to
@@ -675,6 +720,7 @@ async function start() {
   testing = false;
   $("test").textContent = "마이크 테스트";
   streaming = true;
+  laggy = false;
   running(true);
   holdScreen();
   retryWait = 0;
