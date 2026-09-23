@@ -29,6 +29,9 @@
     }
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  /* An author `display` beats the browser's own [hidden] rule, so hiding an
+     element by attribute silently does nothing. Settle it once, here. */
+  [hidden] { display: none !important; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
     font: 15px/1.6 -apple-system, "Segoe UI", "Malgun Gothic", system-ui, sans-serif;
