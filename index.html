@@ -242,8 +242,16 @@ let ticker = null, startedAt = 0, elapsedBase = 0, saveTimer = null;
 // --- persistence -------------------------------------------------------------
 
 function save() {
-  try { localStorage.setItem(STORE, JSON.stringify({ segments, names })); }
-  catch (err) { /* private window or full quota; the live transcript still stands */ }
+  try {
+    // Refuse to blank out a stored meeting. Whatever leaves this page holding
+    // nothing — a failed restore, a half-loaded tab — must not be able to take
+    // the record with it. Clearing goes through removeItem, not through here.
+    if (!segments.length) {
+      const prior = JSON.parse(localStorage.getItem(STORE) || "{}");
+      if (Array.isArray(prior.segments) && prior.segments.length) return;
+    }
+    localStorage.setItem(STORE, JSON.stringify({ segments, names, elapsed: elapsedSoFar() }));
+  } catch (err) { /* private window or full quota; the live transcript still stands */ }
 }
 
 function scheduleSave() {
@@ -256,6 +264,9 @@ function restore() {
     const saved = JSON.parse(localStorage.getItem(STORE) || "{}");
     if (Array.isArray(saved.segments)) segments = saved.segments;
     if (saved.names && typeof saved.names === "object") names = saved.names;
+    // Carry the clock over too: a meeting that resumes at 00:00:00 reads as a
+    // fresh one even when the transcript above it is intact.
+    if (typeof saved.elapsed === "number") elapsedBase = saved.elapsed;
     apiKey = localStorage.getItem(KEY_STORE) || "";
   } catch (err) { /* corrupt or unavailable: start clean */ }
   runBase = segments.length;
@@ -592,31 +603,39 @@ function buildConfig() {
   return config;
 }
 
-async function start() {
-  try { await openAudio(); }
-  catch (err) { show("오디오를 열 수 없습니다: " + err.message); return; }
+// A connection can die without the meeting being over. Losing one is a reason to
+// open another, not to end the session: the transcript, the microphone and the
+// clock all carry across, and the user never has to press 시작 again. Speech
+// during the gap is genuinely gone — nothing reached Soniox — but everything
+// before and after it stays in one record.
 
-  testing = false;
-  $("test").textContent = "마이크 테스트";
-  setState("연결 중…", "");
+let retryTimer = null, retryWait = 0;
+const RETRY_MAX = 15000;
 
-  ws = new WebSocket(ENDPOINT);
-  ws.binaryType = "arraybuffer";
+function connect() {
+  clearTimeout(retryTimer);
+  retryTimer = null;
+  setState(retryWait ? "재연결 중…" : "연결 중…", "");
 
-  ws.onopen = () => {
-    ws.send(JSON.stringify(buildConfig()));
-    // Everything recorded so far is history now; this run writes after it.
+  const sock = new WebSocket(ENDPOINT);
+  ws = sock;
+  sock.binaryType = "arraybuffer";
+
+  sock.onopen = () => {
+    sock.send(JSON.stringify(buildConfig()));
+    // Everything recorded so far is history now; this connection writes after it.
     runBase = segments.length;
-    streaming = true;
-    running(true);
-    holdScreen();
+    retryWait = 0;
     setState("녹음 중", "live");
     show(null);
   };
 
-  ws.onmessage = (ev) => {
+  sock.onmessage = (ev) => {
+    if (sock !== ws) return;
     const response = JSON.parse(ev.data);
     if (response.error_code) {
+      // A rejected key or a bad config will be rejected again just as fast, so
+      // this ends the session rather than joining the retry loop.
       setState("오류", "error");
       show("[" + response.error_code + "] " + (response.error_message || response.error_type));
       stop();
@@ -630,22 +649,66 @@ async function start() {
     if (response.finished) stop();
   };
 
-  ws.onerror = () => { setState("연결 실패", "error"); };
-  ws.onclose = () => { if (streaming) stop(); };
+  sock.onerror = () => { /* onclose follows and does the deciding */ };
+
+  sock.onclose = () => {
+    if (sock !== ws) return;          // a superseded socket closing is not news
+    ws = null;
+    if (!streaming) return;           // the user pressed 정지
+    save();
+    retryWait = Math.min(retryWait ? retryWait * 2 : 1000, RETRY_MAX);
+    setState("연결 끊김 · 재연결 대기", "error");
+    show("인터넷이 끊겼습니다. 연결되면 자동으로 이어서 기록합니다. 기록은 그대로 있습니다.");
+    retryTimer = setTimeout(connect, retryWait);
+  };
+}
+
+// The browser knows the network is back sooner than a backoff timer does.
+window.addEventListener("online", () => {
+  if (streaming && !ws) { retryWait = 0; connect(); }
+});
+
+async function start() {
+  try { await openAudio(); }
+  catch (err) { show("오디오를 열 수 없습니다: " + err.message); return; }
+
+  testing = false;
+  $("test").textContent = "마이크 테스트";
+  streaming = true;
+  running(true);
+  holdScreen();
+  retryWait = 0;
+  connect();
 }
 
 function stop() {
-  if (ws && ws.readyState === 1) {
-    // An empty frame ends the stream; the server flushes and closes.
-    try { ws.send(new ArrayBuffer(0)); } catch (err) {}
-  }
+  // Before anything else: this ends the session, so a pending retry must not
+  // quietly bring it back.
   streaming = false;
+  clearTimeout(retryTimer);
+  retryTimer = null;
+
+  const sock = ws;
+  if (sock && sock.readyState === 1) {
+    // An empty frame ends the stream; the server flushes and closes.
+    try { sock.send(new ArrayBuffer(0)); } catch (err) {}
+  }
   releaseScreen();
   closeAudio();
   running(false);
   setState("정지됨", "");
   save();
-  setTimeout(() => { if (ws) { ws.close(); ws = null; } }, 1500);
+  // Hold the socket open briefly for the final tokens. Close the one that was
+  // open when stop ran, not whatever `ws` points at by then — pressing 시작
+  // again within this window used to hand the timer a freshly opened socket.
+  setTimeout(() => {
+    if (sock) sock.close();
+    if (ws === sock) ws = null;
+  }, 1500);
+}
+
+function elapsedSoFar() {
+  return elapsedBase + (startedAt ? (Date.now() - startedAt) / 1000 : 0);
 }
 
 function running(on) {
@@ -802,6 +865,7 @@ $("fold").onclick = () => {
 
 applyFold();
 restore();
+$("clock").textContent = hhmmss(elapsedBase);   // restore() may have carried time over
 render();
 listDevices();
 $("target").disabled = !translateOn;
