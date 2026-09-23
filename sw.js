@@ -1,7 +1,7 @@
 // Minimal shell cache. Its real job is to make the app installable — Chrome
 // requires a service worker before it offers "install" — and to let the page open
 // without a network round trip. Transcription itself always needs the network.
-const CACHE = "meet-live-v3";
+const CACHE = "meet-live-v4";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (event) => {

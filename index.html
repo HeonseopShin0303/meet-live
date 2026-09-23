@@ -41,9 +41,12 @@
   }
 
   header {
-    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    display: flex; flex-direction: column; gap: 8px;
     padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
   }
+  .bar, .setup { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .setup { padding-top: 8px; border-top: 1px solid var(--line); }
+  .fold { color: var(--muted); padding: 5px 9px; }
   .brand { font-weight: 650; margin-right: 2px; }
   select, button, input {
     font: inherit; font-size: 13px; color: var(--ink); background: var(--bg);
@@ -88,6 +91,12 @@
     #speakers { width: auto; border-left: none; border-top: 1px solid var(--line);
                 max-height: 34dvh; }
     select { max-width: 100%; }
+    header { padding: 8px 10px; }
+    .bar { gap: 7px; }
+    .brand { display: none; }       /* the tab title already says it */
+    .meter { width: 48px; }
+    .fold-text { display: none; }   /* the caret alone keeps the bar one row */
+    .fold { padding: 7px 10px; }
   }
 
   .sx-speaker { margin: 16px 0 8px; }
@@ -136,42 +145,53 @@
 </div>
 
 <header>
-  <span class="brand">Meet Live</span>
-  <select id="source" title="오디오 소스">
-    <option value="mic">🎤 마이크</option>
-    <option value="display">🔊 탭·시스템 소리</option>
-  </select>
-  <select id="device" title="마이크 장치"></select>
-  <select id="spoken" title="화자가 쓰는 언어">
-    <option value="">자동 감지</option>
-    <option value="Korean,English" selected>한국어 + English</option>
-    <option value="Korean">한국어</option>
-    <option value="English">English</option>
-    <option value="Japanese">日本語</option>
-    <option value="Mandarin Chinese">中文</option>
-  </select>
-  <button id="xlate" class="toggle on">번역 ON</button>
-  <select id="target" title="번역 언어">
-    <option value="Korean">→ 한국어</option>
-    <option value="English">→ English</option>
-    <option value="Japanese">→ 日本語</option>
-  </select>
-  <input id="terms" placeholder="용어: 협동로봇, 뉴턴" title="인식 정확도를 높일 전문용어">
-  <button id="test">마이크 테스트</button>
-  <button id="start" class="primary">시작</button>
-  <button id="stop" disabled>정지</button>
-  <span class="meter"><span class="fill" id="meterFill"></span></span>
-  <span class="spacer"></span>
-  <button id="clear">기록 지우기</button>
-  <select id="exportMode" title="저장할 내용">
-    <option value="both">원문 + 번역</option>
-    <option value="src">원문만</option>
-    <option value="dst">번역만</option>
-  </select>
-  <button id="export" disabled>기록 저장</button>
-  <button id="keyEdit" title="API 키 변경">키</button>
-  <span class="clock" id="clock">00:00:00</span>
-  <span class="state"><span class="dot" id="dot"></span><span id="stateText">대기</span></span>
+  <!-- Two rows. The top one is what a meeting in progress needs — start, stop,
+       level, clock — and never goes away. Everything that is set once before
+       recording lives below it and folds, because on a phone the full bar ate
+       most of the transcript. -->
+  <div class="bar">
+    <span class="brand">Meet Live</span>
+    <button id="start" class="primary">시작</button>
+    <button id="stop" disabled>정지</button>
+    <span class="meter"><span class="fill" id="meterFill"></span></span>
+    <span class="spacer"></span>
+    <span class="clock" id="clock">00:00:00</span>
+    <span class="state"><span class="dot" id="dot"></span><span id="stateText">대기</span></span>
+    <button id="fold" class="fold" aria-expanded="true" title="설정 접기/펼치기"><span
+      class="fold-text">설정 </span><span id="foldCaret">▴</span></button>
+  </div>
+  <div class="setup" id="setup">
+    <select id="source" title="오디오 소스">
+      <option value="mic">🎤 마이크</option>
+      <option value="display">🔊 탭·시스템 소리</option>
+    </select>
+    <select id="device" title="마이크 장치"></select>
+    <select id="spoken" title="화자가 쓰는 언어">
+      <option value="">자동 감지</option>
+      <option value="Korean,English" selected>한국어 + English</option>
+      <option value="Korean">한국어</option>
+      <option value="English">English</option>
+      <option value="Japanese">日本語</option>
+      <option value="Mandarin Chinese">中文</option>
+    </select>
+    <button id="xlate" class="toggle on">번역 ON</button>
+    <select id="target" title="번역 언어">
+      <option value="Korean">→ 한국어</option>
+      <option value="English">→ English</option>
+      <option value="Japanese">→ 日本語</option>
+    </select>
+    <input id="terms" placeholder="용어: 협동로봇, 뉴턴" title="인식 정확도를 높일 전문용어">
+    <button id="test">마이크 테스트</button>
+    <span class="spacer"></span>
+    <button id="clear">기록 지우기</button>
+    <select id="exportMode" title="저장할 내용">
+      <option value="both">원문 + 번역</option>
+      <option value="src">원문만</option>
+      <option value="dst">번역만</option>
+    </select>
+    <button id="export" disabled>기록 저장</button>
+    <button id="keyEdit" title="API 키 변경">키</button>
+  </div>
 </header>
 
 <div class="banner" id="banner" hidden></div>
@@ -753,8 +773,34 @@ $("keySave").onclick = () => {
 $("keyInput").addEventListener("keydown", (e) => { if (e.key === "Enter") $("keySave").click(); });
 $("keyEdit").onclick = () => openGate(apiKey);
 
+// --- header fold -------------------------------------------------------------
+// Remembered per device, since a phone and a laptop want different answers. The
+// first visit gets the one that suits the screen rather than a fixed default.
+
+const FOLD_STORE = "meetLive.fold";
+let folded = (() => {
+  let saved = null;
+  try { saved = localStorage.getItem(FOLD_STORE); } catch (err) {}
+  if (saved !== null) return saved === "1";
+  return window.matchMedia("(max-width: 720px)").matches;
+})();
+
+function applyFold() {
+  $("setup").hidden = folded;
+  $("foldCaret").textContent = folded ? "▾" : "▴";
+  $("fold").setAttribute("aria-expanded", String(!folded));
+  $("fold").title = folded ? "설정 펼치기" : "설정 접기";
+}
+
+$("fold").onclick = () => {
+  folded = !folded;
+  try { localStorage.setItem(FOLD_STORE, folded ? "1" : "0"); } catch (err) {}
+  applyFold();
+};
+
 // --- boot --------------------------------------------------------------------
 
+applyFold();
 restore();
 render();
 listDevices();
