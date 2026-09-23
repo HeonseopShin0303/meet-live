@@ -423,6 +423,22 @@ class Tap extends AudioWorkletProcessor {
 registerProcessor("tap", Tap);
 `;
 
+// Some phones apply their own echo cancellation or noise suppression whatever we
+// ask for, and some refuse 16 kHz. Both change how the room sounds, so the mic
+// test says what the device actually settled on rather than what was requested.
+function micSummary() {
+  const track = stream && stream.getAudioTracks()[0];
+  if (!track) return "";
+  const got = track.getSettings ? track.getSettings() : {};
+  const forced = [];
+  if (got.echoCancellation) forced.push("에코 제거");
+  if (got.noiseSuppression) forced.push("잡음 억제");
+  const rate = audioCtx ? Math.round(audioCtx.sampleRate / 1000) + "kHz" : "";
+  return forced.length
+    ? "(" + rate + ", 기기가 " + forced.join("·") + "를 강제해 먼 목소리가 작아질 수 있습니다)"
+    : "(" + rate + ", 원시 입력)";
+}
+
 async function listDevices() {
   const sel = $("device");
   const devs = (await navigator.mediaDevices.enumerateDevices())
@@ -451,7 +467,17 @@ async function openAudio() {
     stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         deviceId: id ? { exact: id } : undefined,
-        echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+        // Echo cancellation is the wrong tool here and costs more than it looks.
+        // Asking for it puts a phone on its voice-call audio path, which is tuned
+        // for a handset held to the face: it favours the near mic and gates away
+        // anything further off, so the other people at the table go quiet. It also
+        // subtracts whatever the device is playing, which is exactly the far end
+        // of a call we would want recorded. Noise suppression is no better for
+        // this: it reshapes voice timbre, and timbre is what the diarizer separates
+        // speakers by. Gain control is the mild one — it lifts a distant talker
+        // without touching those cues — so it stays.
+        echoCancellation: false, noiseSuppression: false, autoGainControl: true,
+        channelCount: 1,
       },
     });
   }
@@ -520,7 +546,10 @@ function buildConfig() {
     api_key: apiKey,
     model: MODEL,
     audio_format: "pcm_s16le",
-    sample_rate: RATE,
+    // The rate the context actually got, not the rate asked for: a phone may
+    // refuse 16 kHz and hand back its native 48 kHz. Declaring 16 kHz then would
+    // play the audio back at a third speed on the server and wreck recognition.
+    sample_rate: audioCtx ? audioCtx.sampleRate : RATE,
     num_channels: 1,
     enable_speaker_diarization: true,
     // Deliberately off: the docs state endpoint detection "force[s] tokens to
@@ -641,7 +670,7 @@ $("test").onclick = async () => {
     await openAudio();
     testing = true;
     $("test").textContent = "테스트 중지";
-    show("말해보세요. 레벨 바가 움직이면 정상입니다.");
+    show("말해보세요. 레벨 바가 움직이면 정상입니다. " + micSummary());
   } catch (err) { show("오디오를 열 수 없습니다: " + err.message); }
 };
 
