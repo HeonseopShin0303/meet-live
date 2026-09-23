@@ -1,0 +1,739 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Meet Live</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0f766e">
+<!-- iOS ignores the manifest for home-screen installs and reads these instead. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Meet Live">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  :root {
+    --bg: #ffffff; --panel: #fafaf9; --line: #e7e5e4;
+    --ink: #1c1917; --muted: #78716c; --faint: #a8a29e;
+    --accent: #0f766e; --live: #16a34a; --warn: #b45309; --err: #b91c1c;
+    --sp-a: #1d4ed8; --sp-b: #b45309; --sp-c: #7e22ce;
+    --sp-d: #0f766e; --sp-e: #be123c; --sp-f: #4d7c0f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1917; --panel: #292524; --line: #44403c;
+      --ink: #f5f5f4; --muted: #a8a29e; --faint: #78716c;
+      --accent: #5eead4; --live: #4ade80; --warn: #fbbf24; --err: #fca5a5;
+      --sp-a: #93c5fd; --sp-b: #fcd34d; --sp-c: #d8b4fe;
+      --sp-d: #5eead4; --sp-e: #fda4af; --sp-f: #bef264;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 -apple-system, "Segoe UI", "Malgun Gothic", system-ui, sans-serif;
+    height: 100dvh; display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+
+  header {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .brand { font-weight: 650; margin-right: 2px; }
+  select, button, input {
+    font: inherit; font-size: 13px; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px;
+  }
+  select { max-width: 46vw; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+  button.toggle { font-weight: 600; }
+  button.toggle.on { color: var(--accent); border-color: var(--accent); }
+  button.toggle.off { color: var(--faint); }
+  .spacer { flex: 1; }
+  .clock { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .state { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .dot.live { background: var(--live); animation: pulse 1.6s ease-in-out infinite; }
+  .dot.error { background: var(--err); }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+
+  .meter { width: 92px; height: 9px; border-radius: 999px; overflow: hidden;
+           background: var(--line); flex-shrink: 0; }
+  .fill { display: block; height: 100%; width: 0; background: var(--live); border-radius: 999px; }
+  .fill.hot { background: var(--warn); }
+
+  .stage { flex: 1; min-height: 0; display: flex; }
+  main { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 0 10px;
+         -webkit-overflow-scrolling: touch; }
+  #view { max-width: 900px; margin: 0 auto; padding: 0 16px; }
+
+  #speakers { width: 210px; flex-shrink: 0; overflow-y: auto; padding: 16px 12px;
+              border-left: 1px solid var(--line); background: var(--panel); }
+  .sp-head { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  .sp-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .sp-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .sp-row input { flex: 1; min-width: 0; font-size: 13px; padding: 6px 8px; }
+  .sp-note { font-size: 12px; color: var(--faint); margin-top: 12px; line-height: 1.45; }
+
+  /* On a phone the rail would eat the transcript, so it moves under it. */
+  @media (max-width: 720px) {
+    .stage { flex-direction: column; }
+    #speakers { width: auto; border-left: none; border-top: 1px solid var(--line);
+                max-height: 34dvh; }
+    select { max-width: 100%; }
+  }
+
+  .sx-speaker { margin: 16px 0 8px; }
+  .sx-speaker:first-child { margin-top: 0; }
+  .chip { font-size: 12px; font-weight: 650; padding: 1px 8px; border-radius: 999px;
+          border: 1px solid currentColor; }
+  .sx-pair + .sx-pair { margin-top: 12px; }
+  .sx-src { color: var(--ink); line-height: 1.5; }
+  .sx-dst { color: var(--accent); font-size: 17px; line-height: 1.5; margin-top: 3px; }
+  .sx-src + .sx-src, .sx-dst + .sx-dst { margin-top: 3px; }
+  /* Height is reserved even when empty: collapsing it when the speaker pauses
+     moved every line below and the reader lost their place. */
+  .partial { color: var(--faint); font-style: italic; min-height: 1.6em; }
+
+  .empty { padding: 44px 16px; color: var(--faint); text-align: center; line-height: 1.7; }
+  .empty b { color: var(--ink); }
+  .banner { padding: 9px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
+            color: var(--warn); font-size: 13px; }
+
+  /* First run: no key, nothing else matters until one is entered. */
+  #gate { position: fixed; inset: 0; background: var(--bg); z-index: 10;
+          display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .gate-card { max-width: 460px; width: 100%; }
+  .gate-card h1 { font-size: 20px; margin: 0 0 8px; }
+  .gate-card p { color: var(--muted); font-size: 14px; line-height: 1.6; }
+  .gate-card input { width: 100%; margin: 14px 0 10px; font-family: ui-monospace, monospace; }
+  .gate-card button { width: 100%; padding: 11px; }
+  .gate-card .note { font-size: 12px; color: var(--faint); margin-top: 14px; }
+</style>
+</head>
+<body>
+
+<div id="gate" hidden>
+  <div class="gate-card">
+    <h1>Meet Live</h1>
+    <p>Soniox API 키를 입력하세요. 키는 이 기기의 브라우저에만 저장되며
+       서버로 전송되지 않습니다.</p>
+    <input id="keyInput" type="password" placeholder="snx_..." autocomplete="off"
+           autocapitalize="off" spellcheck="false">
+    <button class="primary" id="keySave">시작하기</button>
+    <div class="note">
+      키 발급: console.soniox.com → My First Project → API Keys<br>
+      나중에 헤더의 <b>키</b> 버튼에서 바꿀 수 있습니다.
+    </div>
+  </div>
+</div>
+
+<header>
+  <span class="brand">Meet Live</span>
+  <select id="source" title="오디오 소스">
+    <option value="mic">🎤 마이크</option>
+    <option value="display">🔊 탭·시스템 소리</option>
+  </select>
+  <select id="device" title="마이크 장치"></select>
+  <select id="spoken" title="화자가 쓰는 언어">
+    <option value="">자동 감지</option>
+    <option value="Korean,English" selected>한국어 + English</option>
+    <option value="Korean">한국어</option>
+    <option value="English">English</option>
+    <option value="Japanese">日本語</option>
+    <option value="Mandarin Chinese">中文</option>
+  </select>
+  <button id="xlate" class="toggle on">번역 ON</button>
+  <select id="target" title="번역 언어">
+    <option value="Korean">→ 한국어</option>
+    <option value="English">→ English</option>
+    <option value="Japanese">→ 日本語</option>
+  </select>
+  <input id="terms" placeholder="용어: 협동로봇, 뉴턴" title="인식 정확도를 높일 전문용어">
+  <button id="test">마이크 테스트</button>
+  <button id="start" class="primary">시작</button>
+  <button id="stop" disabled>정지</button>
+  <span class="meter"><span class="fill" id="meterFill"></span></span>
+  <span class="spacer"></span>
+  <button id="clear">기록 지우기</button>
+  <select id="exportMode" title="저장할 내용">
+    <option value="both">원문 + 번역</option>
+    <option value="src">원문만</option>
+    <option value="dst">번역만</option>
+  </select>
+  <button id="export" disabled>기록 저장</button>
+  <button id="keyEdit" title="API 키 변경">키</button>
+  <span class="clock" id="clock">00:00:00</span>
+  <span class="state"><span class="dot" id="dot"></span><span id="stateText">대기</span></span>
+</header>
+
+<div class="banner" id="banner" hidden></div>
+
+<div class="stage">
+  <main id="main"><div id="view"></div></main>
+  <aside id="speakers">
+    <div class="sp-head">화자</div>
+    <div id="speakerList"></div>
+    <div class="sp-note" id="speakerNote">아직 인식된 화자가 없습니다.</div>
+  </aside>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// --- Soniox, spoken to directly from the browser -----------------------------
+// There is no server in this build. The page opens the WebSocket itself, which is
+// why it must be served over HTTPS: getUserMedia is refused on plain http outside
+// localhost, and without a microphone none of the rest matters.
+const ENDPOINT = "wss://stt-rt.soniox.com/transcribe-websocket";
+const MODEL = "stt-rt-v5";
+// 16 kHz is the standard rate for speech recognition and a quarter of the bytes
+// of 48 kHz, which matters on a phone's data connection.
+const RATE = 16000;
+
+const LANGS = { "Korean": "ko", "English": "en", "Japanese": "ja", "Mandarin Chinese": "zh" };
+const code = (name) => LANGS[name] || String(name).slice(0, 2).toLowerCase();
+
+// Endpoint detection emits these as ordinary tokens; they are control marks, not
+// speech, and rendering them puts a literal "<end>" mid-sentence.
+const MARKERS = new Set(["<end>", "<fin>"]);
+
+const STORE = "meetLive.v1";
+const KEY_STORE = "meetLive.key";
+
+let apiKey = "";
+let segments = [];          // [{speaker, src, dst}] — grows across runs
+let runBase = 0;            // where the run in progress begins
+let partial = { src: "", dst: "" };
+let names = {};             // speaker id -> name typed by the user
+let translateOn = true, exported = true;
+
+let ws = null, stream = null, audioCtx = null, node = null, wakeLock = null;
+let testing = false, streaming = false;
+let ticker = null, startedAt = 0, elapsedBase = 0, saveTimer = null;
+
+// --- persistence -------------------------------------------------------------
+
+function save() {
+  try { localStorage.setItem(STORE, JSON.stringify({ segments, names })); }
+  catch (err) { /* private window or full quota; the live transcript still stands */ }
+}
+
+function scheduleSave() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => { saveTimer = null; save(); }, 1500);
+}
+
+function restore() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORE) || "{}");
+    if (Array.isArray(saved.segments)) segments = saved.segments;
+    if (saved.names && typeof saved.names === "object") names = saved.names;
+    apiKey = localStorage.getItem(KEY_STORE) || "";
+  } catch (err) { /* corrupt or unavailable: start clean */ }
+  runBase = segments.length;
+}
+
+// --- token assembly ----------------------------------------------------------
+// Tokens arrive as subwords tagged `translation_status` and flagged `is_final`.
+// The docs warn transcription and translation tokens are "not 1-to-1 mapped" —
+// true of tokens, but the STREAM alternates in chunks: spoken tokens, then the
+// translation of that chunk. Switching back to original marks the end of a pair,
+// which is what lets each source line sit directly above its own translation.
+
+function openBlock(speaker) {
+  const last = segments[segments.length - 1];
+  if (last && !last.dst && last.speaker === speaker && segments.length > runBase) return last;
+  const block = { speaker, src: "", dst: "" };
+  segments.push(block);
+  return block;
+}
+
+let lastSpeaker = "1";
+
+function absorb(response) {
+  const pendingSrc = [], pendingDst = [];
+  for (const token of response.tokens || []) {
+    const text = token.text || "";
+    if (!text || MARKERS.has(text.trim())) continue;
+    const isTranslation = token.translation_status === "translation";
+
+    if (!token.is_final) {
+      (isTranslation ? pendingDst : pendingSrc).push(text);
+      continue;
+    }
+    if (isTranslation) {
+      if (!segments.length) segments.push({ speaker: lastSpeaker, src: "", dst: "" });
+      segments[segments.length - 1].dst += text;
+    } else {
+      // Speaker only rides on spoken tokens, and only while diarization is on;
+      // carry the last one forward across the gaps.
+      lastSpeaker = token.speaker || lastSpeaker;
+      openBlock(lastSpeaker).src += text;
+    }
+  }
+  partial = { src: pendingSrc.join("").trim(), dst: pendingDst.join("").trim() };
+  if (segments.length) exported = false;
+}
+
+// --- rendering ---------------------------------------------------------------
+
+const SPEAKER_VARS = ["--sp-a", "--sp-b", "--sp-c", "--sp-d", "--sp-e", "--sp-f"];
+const speakerColor = (id) =>
+  "var(" + SPEAKER_VARS[Math.abs((parseInt(id, 10) || 1) - 1) % SPEAKER_VARS.length] + ")";
+const speakerLabel = (id) => (names[id] || "").trim() || "화자 " + id;
+
+// Soniox punctuates its output, so a plain sentence split is enough here.
+const sentences = (text) =>
+  !text ? [] : text.split(/(?<=[.!?…])\s+/).map((t) => t.trim()).filter(Boolean);
+
+function render() {
+  const view = $("view");
+  view.innerHTML = "";
+
+  if (!segments.length && !partial.src && !partial.dst) {
+    const hint = document.createElement("div");
+    hint.className = "empty";
+    hint.innerHTML = "<b>마이크 테스트</b>로 레벨 바가 움직이는지 확인한 뒤<br><b>시작</b>을 누르세요.";
+    view.appendChild(hint);
+    renderSpeakers();
+    return;
+  }
+
+  let shown = null;
+  for (const block of segments) {
+    // One chip per speaker run: a speaker talking for a minute produces many
+    // blocks and a chip on each would be noise.
+    if (block.speaker !== shown) {
+      shown = block.speaker;
+      const head = document.createElement("div");
+      head.className = "sx-speaker";
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.style.color = speakerColor(shown);
+      chip.textContent = speakerLabel(shown);
+      head.appendChild(chip);
+      view.appendChild(head);
+    }
+    const pair = document.createElement("div");
+    pair.className = "sx-pair";
+    for (const line of sentences(block.src)) {
+      const row = document.createElement("div");
+      row.className = "sx-src";
+      row.textContent = line;
+      pair.appendChild(row);
+    }
+    for (const line of sentences(block.dst)) {
+      const row = document.createElement("div");
+      row.className = "sx-dst";
+      row.textContent = line;
+      pair.appendChild(row);
+    }
+    view.appendChild(pair);
+  }
+
+  const pending = document.createElement("div");
+  pending.className = "sx-pair";
+  const ps = document.createElement("div");
+  ps.className = "partial";
+  ps.textContent = partial.src;
+  pending.appendChild(ps);
+  if (partial.dst) {
+    const pd = document.createElement("div");
+    pd.className = "partial";
+    pd.style.color = "var(--accent)";
+    pd.style.opacity = ".55";
+    pd.textContent = partial.dst;
+    pending.appendChild(pd);
+  }
+  view.appendChild(pending);
+  renderSpeakers();
+}
+
+function renderSpeakers() {
+  const list = $("speakerList");
+  const ids = [];
+  for (const seg of segments) if (seg.speaker && !ids.includes(seg.speaker)) ids.push(seg.speaker);
+  // Rebuild only when the roster changes, so typing a name is never interrupted
+  // by a re-render mid-keystroke.
+  if (list.dataset.ids === ids.join(",")) return;
+  list.dataset.ids = ids.join(",");
+  list.innerHTML = "";
+  for (const id of ids) {
+    const row = document.createElement("div");
+    row.className = "sp-row";
+    const dot = document.createElement("span");
+    dot.className = "sp-dot";
+    dot.style.background = speakerColor(id);
+    const input = document.createElement("input");
+    input.value = names[id] || "";
+    input.placeholder = "화자 " + id;
+    input.oninput = () => { names[id] = input.value; render(); save(); };
+    row.append(dot, input);
+    list.appendChild(row);
+  }
+  $("speakerNote").textContent = ids.length
+    ? ids.length + "명 인식됨. 이름을 넣으면 과거 기록까지 바뀝니다."
+    : "아직 인식된 화자가 없습니다.";
+}
+
+let following = true;
+$("main").addEventListener("scroll", () => {
+  const m = $("main");
+  following = m.scrollHeight - m.scrollTop - m.clientHeight < 60;
+});
+const autoscroll = () => { if (following) $("main").scrollTop = $("main").scrollHeight; };
+
+// --- audio -------------------------------------------------------------------
+
+const WORKLET = `
+class Tap extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = []; this.target = Math.round(sampleRate * 0.12); }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (!ch) return true;
+    let peak = 0;
+    const pcm = new Int16Array(ch.length);
+    for (let i = 0; i < ch.length; i++) {
+      const s = Math.max(-1, Math.min(1, ch[i]));
+      if (s > peak) peak = s; else if (-s > peak) peak = -s;
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    this.buf.push(pcm);
+    let held = this.buf.reduce((n, a) => n + a.length, 0);
+    if (held >= this.target) {
+      const out = new Int16Array(held);
+      let at = 0;
+      for (const a of this.buf) { out.set(a, at); at += a.length; }
+      this.buf = [];
+      this.port.postMessage({ pcm: out, peak }, [out.buffer]);
+    } else {
+      this.port.postMessage({ peak });
+    }
+    return true;
+  }
+}
+registerProcessor("tap", Tap);
+`;
+
+async function listDevices() {
+  const sel = $("device");
+  const devs = (await navigator.mediaDevices.enumerateDevices())
+    .filter((d) => d.kind === "audioinput");
+  const chosen = sel.value;
+  sel.innerHTML = "";
+  for (const d of devs) {
+    const o = document.createElement("option");
+    o.value = d.deviceId;
+    o.textContent = d.label || "(권한 허용 후 이름 표시)";
+    sel.appendChild(o);
+  }
+  if (chosen) sel.value = chosen;
+}
+
+async function openAudio() {
+  if (audioCtx) return;
+  if ($("source").value === "display") {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    stream.getVideoTracks().forEach((t) => t.stop());
+    if (!stream.getAudioTracks().length) {
+      throw new Error("공유 창에서 '시스템 오디오 공유'를 켜야 합니다.");
+    }
+  } else {
+    const id = $("device").value;
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: id ? { exact: id } : undefined,
+        echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+      },
+    });
+  }
+
+  audioCtx = new AudioContext({ sampleRate: RATE });
+  const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
+  await audioCtx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+
+  node = new AudioWorkletNode(audioCtx, "tap");
+  node.port.onmessage = (e) => {
+    const fill = $("meterFill");
+    const peak = e.data.peak || 0;
+    fill.style.width = Math.min(100, Math.pow(peak, 0.5) * 108) + "%";
+    fill.className = "fill" + (peak > 0.9 ? " hot" : "");
+    if (streaming && e.data.pcm && ws && ws.readyState === 1) ws.send(e.data.pcm.buffer);
+  };
+  audioCtx.createMediaStreamSource(stream).connect(node);
+  // A worklet needs a downstream node to be pulled, but the audio must not be
+  // played back — that would echo the room. Zero gain keeps it silent.
+  const mute = audioCtx.createGain();
+  mute.gain.value = 0;
+  node.connect(mute).connect(audioCtx.destination);
+
+  await listDevices();
+}
+
+function closeAudio() {
+  streaming = false;
+  if (node) { node.port.onmessage = null; node.disconnect(); node = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  $("meterFill").style.width = "0";
+}
+
+// --- wake lock ---------------------------------------------------------------
+// A browser cannot record with the screen off: the page is suspended and capture
+// stops. Holding the screen awake is the only way a web app can keep a long
+// meeting running, so it is requested for the duration of a recording.
+
+async function holdScreen() {
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    // A tab switch releases it; take it back when the page returns.
+    document.addEventListener("visibilitychange", reacquire);
+  } catch (err) {
+    show("화면 꺼짐 방지를 사용할 수 없습니다. 화면이 꺼지면 녹음이 중단됩니다.");
+  }
+}
+
+async function reacquire() {
+  if (document.visibilityState === "visible" && streaming && !wakeLock) {
+    try { wakeLock = await navigator.wakeLock.request("screen"); } catch (err) {}
+  }
+}
+
+function releaseScreen() {
+  document.removeEventListener("visibilitychange", reacquire);
+  if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+}
+
+// --- session -----------------------------------------------------------------
+
+function buildConfig() {
+  const config = {
+    api_key: apiKey,
+    model: MODEL,
+    audio_format: "pcm_s16le",
+    sample_rate: RATE,
+    num_channels: 1,
+    enable_speaker_diarization: true,
+    // Deliberately off: the docs state endpoint detection "force[s] tokens to
+    // finalize early, which reduces diarization accuracy". Speaker labels are the
+    // point of this app, so the slightly later commit is the better trade.
+    enable_endpoint_detection: false,
+  };
+  const hints = ($("spoken").value || "").split(",").filter(Boolean).map(code);
+  if (hints.length) config.language_hints = hints;
+
+  if (translateOn) {
+    const target = code($("target").value);
+    const others = hints.filter((h) => h !== target);
+    config.translation = (hints.length >= 2 && others.length)
+      ? { type: "two_way", language_a: others[0], language_b: target }
+      : { type: "one_way", target_language: target };
+  }
+  const terms = $("terms").value.split(",").map((t) => t.trim()).filter(Boolean);
+  if (terms.length) config.context = { terms };
+  return config;
+}
+
+async function start() {
+  try { await openAudio(); }
+  catch (err) { show("오디오를 열 수 없습니다: " + err.message); return; }
+
+  testing = false;
+  $("test").textContent = "마이크 테스트";
+  setState("연결 중…", "");
+
+  ws = new WebSocket(ENDPOINT);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify(buildConfig()));
+    // Everything recorded so far is history now; this run writes after it.
+    runBase = segments.length;
+    streaming = true;
+    running(true);
+    holdScreen();
+    setState("녹음 중", "live");
+    show(null);
+  };
+
+  ws.onmessage = (ev) => {
+    const response = JSON.parse(ev.data);
+    if (response.error_code) {
+      setState("오류", "error");
+      show("[" + response.error_code + "] " + (response.error_message || response.error_type));
+      stop();
+      return;
+    }
+    absorb(response);
+    render();
+    $("export").disabled = !segments.length;
+    scheduleSave();
+    autoscroll();
+    if (response.finished) stop();
+  };
+
+  ws.onerror = () => { setState("연결 실패", "error"); };
+  ws.onclose = () => { if (streaming) stop(); };
+}
+
+function stop() {
+  if (ws && ws.readyState === 1) {
+    // An empty frame ends the stream; the server flushes and closes.
+    try { ws.send(new ArrayBuffer(0)); } catch (err) {}
+  }
+  streaming = false;
+  releaseScreen();
+  closeAudio();
+  running(false);
+  setState("정지됨", "");
+  save();
+  setTimeout(() => { if (ws) { ws.close(); ws = null; } }, 1500);
+}
+
+function running(on) {
+  $("start").disabled = on;
+  $("stop").disabled = !on;
+  for (const id of ["source", "device", "spoken", "target", "terms", "test", "clear"]) {
+    $(id).disabled = on;
+  }
+  if (on) {
+    startedAt = Date.now();
+    ticker = setInterval(
+      () => ($("clock").textContent = hhmmss(elapsedBase + (Date.now() - startedAt) / 1000)), 250);
+  } else {
+    clearInterval(ticker);
+    if (startedAt) elapsedBase += (Date.now() - startedAt) / 1000;
+    startedAt = 0;
+    $("clock").textContent = hhmmss(elapsedBase);
+  }
+}
+
+// --- misc UI -----------------------------------------------------------------
+
+function hhmmss(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  return [s / 3600, (s % 3600) / 60, s % 60]
+    .map((n) => String(Math.floor(n)).padStart(2, "0")).join(":");
+}
+
+function setState(text, cls) {
+  $("stateText").textContent = text;
+  $("dot").className = "dot" + (cls ? " " + cls : "");
+}
+
+function show(msg) {
+  $("banner").hidden = !msg;
+  if (msg) $("banner").textContent = msg;
+}
+
+$("test").onclick = async () => {
+  if (testing) { testing = false; closeAudio(); $("test").textContent = "마이크 테스트"; show(null); return; }
+  try {
+    await openAudio();
+    testing = true;
+    $("test").textContent = "테스트 중지";
+    show("말해보세요. 레벨 바가 움직이면 정상입니다.");
+  } catch (err) { show("오디오를 열 수 없습니다: " + err.message); }
+};
+
+$("start").onclick = start;
+$("stop").onclick = stop;
+
+$("xlate").onclick = () => {
+  translateOn = !translateOn;
+  $("xlate").textContent = translateOn ? "번역 ON" : "번역 OFF";
+  $("xlate").className = "toggle " + (translateOn ? "on" : "off");
+  $("target").disabled = !translateOn;
+  if (streaming) show("번역 설정은 다음 녹음부터 적용됩니다.");
+};
+
+$("source").onchange = () => { if (!streaming) { testing = false; closeAudio(); $("test").textContent = "마이크 테스트"; } };
+$("device").onchange = () => { if (!streaming) { closeAudio(); if (testing) { testing = false; $("test").click(); } } };
+
+$("clear").onclick = () => {
+  if (segments.length) {
+    const warning = exported
+      ? "지금까지의 기록을 지우고 새 회의를 시작합니다. 계속할까요?"
+      : "아직 저장하지 않은 기록이 있습니다. 지우면 되돌릴 수 없습니다. 계속할까요?";
+    if (!confirm(warning)) return;
+  }
+  clearTimeout(saveTimer); saveTimer = null;
+  segments = []; runBase = 0; partial = { src: "", dst: "" }; names = {};
+  lastSpeaker = "1"; elapsedBase = 0; exported = true;
+  $("clock").textContent = "00:00:00";
+  $("export").disabled = true;
+  // A sentinel, not "": renderSpeakers skips the rebuild when the cached roster
+  // matches, and an empty roster joins to "".
+  $("speakerList").dataset.ids = "\u0000";
+  render();
+  try { localStorage.removeItem(STORE); } catch (err) {}
+  show("기록을 지웠습니다.");
+};
+
+$("export").onclick = () => {
+  const mode = $("exportMode").value;
+  const label = { both: "원문 + 번역", src: "원문", dst: "번역" }[mode];
+  const lines = ["# 회의 기록", "", "_" + label + "_", ""];
+  let shown = null;
+  for (const block of segments) {
+    if (block.speaker !== shown) {
+      shown = block.speaker;
+      lines.push("### " + speakerLabel(shown), "");
+    }
+    if (mode !== "dst" && block.src) lines.push(block.src, "");
+    if (mode !== "src" && block.dst) lines.push(mode === "dst" ? block.dst : "> " + block.dst, "");
+  }
+  exported = true;
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "");
+  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/markdown" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "transcript-" + mode + "-" + stamp + ".md";
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+// --- API key -----------------------------------------------------------------
+// The key is typed once and kept in this browser. It is never in the page source,
+// so the page itself can be hosted publicly without exposing anything.
+
+function openGate(existing) {
+  $("gate").hidden = false;
+  $("keyInput").value = existing || "";
+  setTimeout(() => $("keyInput").focus(), 50);
+}
+
+$("keySave").onclick = () => {
+  const value = $("keyInput").value.trim();
+  if (!value) return;
+  apiKey = value;
+  try { localStorage.setItem(KEY_STORE, value); } catch (err) {}
+  $("gate").hidden = true;
+  show(null);
+};
+
+$("keyInput").addEventListener("keydown", (e) => { if (e.key === "Enter") $("keySave").click(); });
+$("keyEdit").onclick = () => openGate(apiKey);
+
+// --- boot --------------------------------------------------------------------
+
+restore();
+render();
+listDevices();
+$("target").disabled = !translateOn;
+if (!apiKey) openGate("");
+if (!window.isSecureContext) {
+  show("HTTPS가 아니면 마이크를 사용할 수 없습니다. https:// 주소로 열어주세요.");
+}
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>

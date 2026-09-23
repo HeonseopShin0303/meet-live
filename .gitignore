@@ -1,0 +1,7 @@
+# Nothing here is generated, but keep editor and OS noise out of a repo whose
+# whole point is that it can be published.
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
