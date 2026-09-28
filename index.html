@@ -296,7 +296,11 @@ function scheduleSave() {
 function restore() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORE) || "{}");
-    if (Array.isArray(saved.segments)) segments = saved.segments;
+    if (Array.isArray(saved.segments)) {
+      segments = saved.segments;
+      // Meetings stored before speakers were normalised may hold numbers.
+      for (const seg of segments) if (seg.speaker != null) seg.speaker = String(seg.speaker);
+    }
     if (saved.names && typeof saved.names === "object") names = saved.names;
     // Carry the clock over too: a meeting that resumes at 00:00:00 reads as a
     // fresh one even when the transcript above it is intact.
@@ -339,8 +343,12 @@ function absorb(response) {
       segments[segments.length - 1].dst += text;
     } else {
       // Speaker only rides on spoken tokens, and only while diarization is on;
-      // carry the last one forward across the gaps.
-      lastSpeaker = token.speaker || lastSpeaker;
+      // carry the last one forward across the gaps. Normalised to a string: the
+      // field arrives as a number, while ids minted here and used as keys into
+      // `names` are strings, and 2 never matches "2". A falsy check would also
+      // throw away a speaker 0.
+      const sp = token.speaker;
+      if (sp !== undefined && sp !== null && sp !== "") lastSpeaker = String(sp);
       openBlock(lastSpeaker).src += text;
     }
   }
