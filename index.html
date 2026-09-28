@@ -101,8 +101,31 @@
 
   .sx-speaker { margin: 16px 0 8px; }
   .sx-speaker:first-child { margin-top: 0; }
-  .chip { font-size: 12px; font-weight: 650; padding: 1px 8px; border-radius: 999px;
-          border: 1px solid currentColor; }
+  .chip { font-size: 12px; font-weight: 650; padding: 2px 9px; border-radius: 999px;
+          border: 1px solid currentColor; background: none; font-family: inherit;
+          cursor: pointer; line-height: 1.5; }
+  .chip::after { content: "▾"; margin-left: 5px; opacity: .65; font-size: 10px; }
+  .chip:hover { background: var(--panel); }
+
+  /* Correcting a speaker from the transcript. */
+  .picker { position: fixed; z-index: 20; background: var(--bg);
+            border: 1px solid var(--line); border-radius: 12px; padding: 6px;
+            min-width: 210px; max-width: 300px;
+            box-shadow: 0 12px 34px rgba(0, 0, 0, .18); }
+  .picker-title { font-size: 12px; color: var(--muted); padding: 6px 10px 8px; }
+  .picker-row { display: flex; align-items: center; gap: 9px; width: 100%;
+                border: none; background: none; border-radius: 8px;
+                padding: 11px 10px; font-size: 14px; text-align: left; }
+  .picker-row:hover { background: var(--panel); }
+  .picker-row.on { font-weight: 650; }
+  .picker-row.add { color: var(--accent); font-weight: 600; }
+  .picker-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                 white-space: nowrap; }
+  .picker-scope { display: flex; gap: 4px; padding: 0 6px 8px; }
+  .scope-btn { flex: 1; font-size: 12px; padding: 7px 6px; border-radius: 7px;
+               border: 1px solid var(--line); background: none; color: var(--muted); }
+  .scope-btn.on { border-color: var(--accent); color: var(--accent); font-weight: 650; }
+  .picker .tick { color: var(--accent); }
   .sx-pair + .sx-pair { margin-top: 12px; }
   .sx-src { color: var(--ink); line-height: 1.5; }
   .sx-dst { color: var(--accent); font-size: 17px; line-height: 1.5; margin-top: 3px; }
@@ -125,6 +148,16 @@
   .gate-card input { width: 100%; margin: 14px 0 10px; font-family: ui-monospace, monospace; }
   .gate-card button { width: 100%; padding: 11px; }
   .gate-card .note { font-size: 12px; color: var(--faint); margin-top: 14px; }
+
+  /* After the base rules above, so these win. A sheet at the bottom: reachable
+     by thumb, and it never covers the line being corrected the way a popover
+     next to the chip would. */
+  @media (max-width: 720px) {
+    .picker { left: 8px; right: 8px; bottom: 8px; top: auto;
+              max-width: none; padding: 8px; border-radius: 14px; }
+    .picker-row { padding: 14px 12px; font-size: 15px; }
+    .chip { padding: 4px 11px; font-size: 13px; }
+  }
 </style>
 </head>
 <body>
@@ -322,6 +355,151 @@ const speakerColor = (id) =>
   "var(" + SPEAKER_VARS[Math.abs((parseInt(id, 10) || 1) - 1) % SPEAKER_VARS.length] + ")";
 const speakerLabel = (id) => (names[id] || "").trim() || "화자 " + id;
 
+// --- speaker correction ------------------------------------------------------
+// Diarization mislabels a turn now and then, and a wrong name on a line is worse
+// than no name at all. The chip that heads a run is the handle: tapping it moves
+// that whole run elsewhere, because the run is what the chip stands for on
+// screen. Rows are finger-sized and the sheet sits under the thumb on a phone.
+
+let picker = null;
+
+function nextSpeakerId() {
+  let max = 0;
+  for (const seg of segments) {
+    const n = parseInt(seg.speaker, 10);
+    if (n > max) max = n;
+  }
+  return String(max + 1);
+}
+
+function speakerIds() {
+  const ids = [];
+  for (const seg of segments) if (seg.speaker && !ids.includes(seg.speaker)) ids.push(seg.speaker);
+  return ids;
+}
+
+function runLength(at) {
+  const from = segments[at].speaker;
+  let n = 0;
+  while (at + n < segments.length && segments[at + n].speaker === from) n++;
+  return n;
+}
+
+function reassign(at, to, scope) {
+  const from = segments[at].speaker;
+  closePicker();
+  if (from === to) return;
+  if (scope === "line") {
+    // Peel off the first line and leave the rest. The remainder keeps the old
+    // speaker and grows its own chip, so repeating this splits a run anywhere —
+    // which is what a turn with two people merged into it needs.
+    segments[at].speaker = to;
+  } else {
+    for (let i = at; i < segments.length && segments[i].speaker === from; i++) {
+      segments[i].speaker = to;
+    }
+  }
+  render();
+  save();
+}
+
+function onPickerOutside(e) { if (picker && !picker.contains(e.target)) closePicker(); }
+function onPickerKey(e) { if (e.key === "Escape") closePicker(); }
+
+function closePicker() {
+  if (!picker) return;
+  picker.remove();
+  picker = null;
+  document.removeEventListener("pointerdown", onPickerOutside, true);
+  document.removeEventListener("keydown", onPickerKey, true);
+  window.removeEventListener("resize", closePicker);
+}
+
+function openPicker(chip, at) {
+  closePicker();
+  const current = segments[at].speaker;
+
+  picker = document.createElement("div");
+  picker.className = "picker";
+  picker.setAttribute("role", "dialog");
+  picker.setAttribute("aria-label", "화자 변경");
+
+  const title = document.createElement("div");
+  title.className = "picker-title";
+  title.textContent = "이 발언의 화자";
+  picker.appendChild(title);
+
+  // Only worth asking when the chip covers more than one line.
+  const lines = runLength(at);
+  let scope = "run";
+  if (lines > 1) {
+    const choice = document.createElement("div");
+    choice.className = "picker-scope";
+    for (const [value, text] of [["run", "묶음 전체 " + lines + "줄"], ["line", "첫 줄만"]]) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "scope-btn" + (value === scope ? " on" : "");
+      b.textContent = text;
+      b.onclick = () => {
+        scope = value;
+        for (const other of choice.children) other.classList.toggle("on", other === b);
+      };
+      choice.appendChild(b);
+    }
+    picker.appendChild(choice);
+  }
+
+  for (const id of speakerIds()) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "picker-row" + (id === current ? " on" : "");
+    const dot = document.createElement("span");
+    dot.className = "sp-dot";
+    dot.style.background = speakerColor(id);
+    const name = document.createElement("span");
+    name.className = "picker-name";
+    name.textContent = speakerLabel(id);
+    row.append(dot, name);
+    if (id === current) {
+      const tick = document.createElement("span");
+      tick.className = "tick";
+      tick.textContent = "✓";
+      row.appendChild(tick);
+    }
+    row.onclick = () => reassign(at, id, scope);
+    picker.appendChild(row);
+  }
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "picker-row add";
+  add.textContent = "+ 새 화자";
+  add.onclick = () => reassign(at, nextSpeakerId(), scope);
+  picker.appendChild(add);
+
+  document.body.appendChild(picker);
+
+  // A phone gets a sheet at the bottom (CSS places it); a pointer gets the list
+  // under the chip it came from, kept inside the window.
+  if (!window.matchMedia("(max-width: 720px)").matches) {
+    const r = chip.getBoundingClientRect();
+    picker.style.left =
+      Math.max(8, Math.min(r.left, innerWidth - picker.offsetWidth - 8)) + "px";
+    picker.style.top =
+      Math.max(8, Math.min(r.bottom + 6, innerHeight - picker.offsetHeight - 8)) + "px";
+  }
+
+  // Deferred: the click that opened this would otherwise close it immediately.
+  setTimeout(() => {
+    document.addEventListener("pointerdown", onPickerOutside, true);
+    document.addEventListener("keydown", onPickerKey, true);
+    // Rotating the phone moves the chip out from under coordinates already
+    // written, and crosses the breakpoint the layout was chosen at. Close it
+    // and let the next tap place a fresh one.
+    window.addEventListener("resize", closePicker, { once: true });
+  }, 0);
+}
+
 // Soniox punctuates its output, so a plain sentence split is enough here.
 const sentences = (text) =>
   !text ? [] : text.split(/(?<=[.!?…])\s+/).map((t) => t.trim()).filter(Boolean);
@@ -340,17 +518,23 @@ function render() {
   }
 
   let shown = null;
-  for (const block of segments) {
+  for (let at = 0; at < segments.length; at++) {
+    const block = segments[at];
     // One chip per speaker run: a speaker talking for a minute produces many
-    // blocks and a chip on each would be noise.
+    // blocks and a chip on each would be noise. The chip carries the index it
+    // heads, which is what a correction acts on.
     if (block.speaker !== shown) {
       shown = block.speaker;
       const head = document.createElement("div");
       head.className = "sx-speaker";
-      const chip = document.createElement("span");
+      const chip = document.createElement("button");
       chip.className = "chip";
+      chip.type = "button";
       chip.style.color = speakerColor(shown);
       chip.textContent = speakerLabel(shown);
+      chip.title = "눌러서 화자 변경";
+      const runAt = at;
+      chip.onclick = () => openPicker(chip, runAt);
       head.appendChild(chip);
       view.appendChild(head);
     }
