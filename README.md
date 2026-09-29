@@ -24,7 +24,13 @@ API Keys.
   translation, rather than two separate walls of text.
 - **Resumes** — stopping, restarting, or losing the connection continues the same
   transcript instead of starting a blank page. It survives a reload.
-- **Export** — Markdown, as source only, translation only, or both.
+- **Re-split the speakers** — the page keeps the audio as well as the transcript.
+  Pressing 화자 재분리 after the meeting uploads it and transcribes it again with
+  the async model, which sees the whole recording before deciding who spoke and
+  is markedly more accurate than deciding live. It also recovers anything said
+  while the connection was down, since the microphone kept recording through it.
+- **Export** — title the meeting at the top and it is saved as
+  `YYMMDD_title.md` and `.txt` together, as source only, translation only, or both.
 
 ## Installing on a phone
 
@@ -38,16 +44,17 @@ capture; only a native app can hold a microphone open behind a lock screen. The
 page requests a screen wake lock while recording, which is as far as a web app can
 go — keep it plugged in for a long meeting.
 
-For recording you do not need to watch live, use the phone's own voice recorder and
-transcribe the file afterwards. Soniox's async API is cheaper and its speaker
-separation is markedly better, because the model sees the whole recording at once
-rather than guessing from the last few seconds.
+**Keep the audio across a reload.** It is held in the page, so re-splitting the
+speakers has to happen before the tab closes. The transcript itself survives.
 
 ## Cost
 
 Billed per audio to whoever's key is in the browser. Measured against the dashboard
 at roughly **$0.20 per hour** with translation on — the published $0.12/hour covers
 transcription, and translation doubles the output text tokens.
+
+Re-splitting the speakers is a second transcription of the same audio and is
+billed again, at the lower async rate of about $0.10 per hour.
 
 ## Files
 

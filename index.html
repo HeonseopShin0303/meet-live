@@ -136,6 +136,12 @@
 
   .empty { padding: 44px 16px; color: var(--faint); text-align: center; line-height: 1.7; }
   .empty b { color: var(--ink); }
+  .title { border: none; border-bottom: 1px solid var(--line); border-radius: 0;
+           background: var(--bg); width: 100%; padding: 10px 16px;
+           font-size: 16px; font-weight: 650; color: var(--ink); }
+  .title::placeholder { font-weight: 400; color: var(--faint); }
+  .title:focus { outline: none; border-bottom-color: var(--accent); }
+
   .banner { padding: 9px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
             color: var(--warn); font-size: 13px; }
 
@@ -223,9 +229,13 @@
       <option value="dst">번역만</option>
     </select>
     <button id="export" disabled>기록 저장</button>
+    <button id="redo" disabled title="녹음된 소리를 다시 올려 화자를 더 정확히 나눕니다">화자 재분리</button>
     <button id="keyEdit" title="API 키 변경">키</button>
   </div>
 </header>
+
+<input id="title" class="title" placeholder="회의 제목 — 저장 파일 이름이 됩니다"
+       autocomplete="off" spellcheck="false" maxlength="80">
 
 <div class="banner" id="banner" hidden></div>
 
@@ -284,7 +294,9 @@ function save() {
       const prior = JSON.parse(localStorage.getItem(STORE) || "{}");
       if (Array.isArray(prior.segments) && prior.segments.length) return;
     }
-    localStorage.setItem(STORE, JSON.stringify({ segments, names, elapsed: elapsedSoFar() }));
+    localStorage.setItem(STORE, JSON.stringify({
+      segments, names, elapsed: elapsedSoFar(), title: $("title").value,
+    }));
   } catch (err) { /* private window or full quota; the live transcript still stands */ }
 }
 
@@ -305,6 +317,7 @@ function restore() {
     // Carry the clock over too: a meeting that resumes at 00:00:00 reads as a
     // fresh one even when the transcript above it is intact.
     if (typeof saved.elapsed === "number") elapsedBase = saved.elapsed;
+    if (typeof saved.title === "string") $("title").value = saved.title;
     apiKey = localStorage.getItem(KEY_STORE) || "";
   } catch (err) { /* corrupt or unavailable: start clean */ }
   runBase = segments.length;
@@ -808,6 +821,202 @@ function releaseScreen() {
   if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
 }
 
+// --- re-transcription --------------------------------------------------------
+// Live diarization has to name a speaker within a second of hearing them and can
+// never revise; the async model sees the whole recording before it decides, which
+// the docs call markedly more accurate. So keep the sound, and let the meeting be
+// run through it again afterwards. It bills at about half the live rate, and it
+// also recovers whatever was said while the socket was down — the microphone kept
+// recording through the gap even though nothing reached Soniox.
+
+const ASYNC_MODEL = "stt-async-v5";
+const API = "https://api.soniox.com/v1";
+
+let recorder = null;
+let recordings = [];        // one blob per run: separate recordings cannot be joined
+let recordedMs = 0, recStart = 0, redoing = false;
+
+function pickMime() {
+  if (!window.MediaRecorder) return null;
+  // Soniox accepts webm, mp4 and m4a among others; Safari has no webm.
+  for (const m of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/mpeg"]) {
+    if (MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return "";
+}
+
+function startRecording() {
+  const mime = pickMime();
+  if (!stream || mime === null) return;
+  try {
+    recorder = new MediaRecorder(stream,
+      mime ? { mimeType: mime, audioBitsPerSecond: 32000 } : undefined);
+  } catch (err) { recorder = null; return; }
+  const parts = [], type = recorder.mimeType || mime || "audio/webm";
+  recorder.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
+  recorder.onstop = () => {
+    if (parts.length) recordings.push(new Blob(parts, { type }));
+    showRedo();
+  };
+  recStart = Date.now();
+  recorder.start(5000);     // flush every 5s so a crash costs seconds, not the meeting
+}
+
+function stopRecording() {
+  if (!recorder) return;
+  recordedMs += Date.now() - recStart;
+  try { recorder.stop(); } catch (err) {}
+  recorder = null;
+}
+
+function showRedo() {
+  const held = recordings.length ? Math.max(1, Math.round(recordedMs / 60000)) : 0;
+  $("redo").textContent = held ? "화자 재분리 (" + held + "분)" : "화자 재분리";
+  $("redo").disabled = !recordings.length || streaming || redoing;
+}
+
+async function api(path, opts) {
+  const res = await fetch(API + path, {
+    ...opts,
+    headers: { Authorization: "Bearer " + apiKey, ...((opts || {}).headers) },
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    const err = new Error("[" + res.status + "] " + detail.slice(0, 200));
+    err.status = res.status;
+    throw err;
+  }
+  return res.status === 204 ? null : res.json();
+}
+
+function asyncBody(fileId, oneWayOnly) {
+  const body = { model: ASYNC_MODEL, file_id: fileId, enable_speaker_diarization: true };
+  const hints = ($("spoken").value || "").split(",").filter(Boolean).map(code);
+  if (hints.length) body.language_hints = hints;
+  if (translateOn) {
+    const target = code($("target").value);
+    const others = hints.filter((h) => h !== target);
+    body.translation = (!oneWayOnly && hints.length >= 2 && others.length)
+      ? { type: "two_way", language_a: others[0], language_b: target }
+      : { type: "one_way", target_language: target };
+  }
+  return body;
+}
+
+async function transcribeBlob(blob, note) {
+  note("업로드 중");
+  const form = new FormData();
+  form.append("file", blob, "meeting." + (blob.type.indexOf("mp4") >= 0 ? "mp4" : "webm"));
+  const file = await api("/files", { method: "POST", body: form });
+
+  try {
+    const post = (oneWay) => api("/transcriptions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(asyncBody(file.id, oneWay)),
+    });
+    let job;
+    try {
+      job = await post(false);
+    } catch (err) {
+      // Two-way translation is documented for real-time; the async reference only
+      // shows one-way. If it is refused, ask for the mode that is documented.
+      if (err.status !== 400 || !translateOn) throw err;
+      job = await post(true);
+    }
+
+    try {
+      note("전사 중");
+      let state = job;
+      while (state.status !== "completed") {
+        if (state.status === "error") throw new Error(state.error_message || "전사 실패");
+        await new Promise((r) => setTimeout(r, 2000));
+        state = await api("/transcriptions/" + job.id);
+      }
+      return (await api("/transcriptions/" + job.id + "/transcript")).tokens || [];
+    } finally {
+      api("/transcriptions/" + job.id, { method: "DELETE" }).catch(() => {});
+    }
+  } finally {
+    // Do not leave the meeting sitting in the account afterwards.
+    api("/files/" + file.id, { method: "DELETE" }).catch(() => {});
+  }
+}
+
+// The whole token list at once, paired the way the live stream is.
+function tokensToSegments(tokens, offset) {
+  const out = [];
+  let speaker = String(1 + offset);
+  for (const token of tokens) {
+    const text = token.text || "";
+    if (!text || MARKERS.has(text.trim())) continue;
+    if (token.translation_status === "translation") {
+      if (!out.length) out.push({ speaker, src: "", dst: "" });
+      out[out.length - 1].dst += text;
+      continue;
+    }
+    const sp = token.speaker;
+    // Each recording numbers its speakers from scratch, so run 2's "1" is not
+    // run 1's "1". Shifting keeps them apart: one person split across two runs is
+    // a correction the chips can make, whereas two people merged is invisible.
+    if (sp !== undefined && sp !== null && sp !== "") speaker = String(Number(sp) + offset);
+    const last = out[out.length - 1];
+    if (last && !last.dst && last.speaker === speaker) last.src += text;
+    else out.push({ speaker, src: text, dst: "" });
+  }
+  return out;
+}
+
+async function redo() {
+  if (!recordings.length || streaming || redoing) return;
+  const minutes = Math.max(1, Math.round(recordedMs / 60000));
+  if (!confirm(
+    "녹음된 소리 약 " + minutes + "분을 Soniox에 올려 처음부터 다시 전사합니다.\n\n" +
+    "· 화자 분리가 더 정확해집니다\n" +
+    "· 지금 화면의 기록과 지정한 화자 이름은 새 결과로 대체됩니다\n" +
+    "· 음성 길이만큼 비용이 다시 청구됩니다\n\n계속할까요?")) return;
+
+  redoing = true;
+  showRedo();
+  const built = [];
+  let offset = 0;
+  try {
+    for (let i = 0; i < recordings.length; i++) {
+      const label = recordings.length > 1 ? " (" + (i + 1) + "/" + recordings.length + ")" : "";
+      const tokens = await transcribeBlob(recordings[i], (what) => {
+        setState(what + label, "");
+        show("화자 재분리 — " + what + label + ". 창을 닫지 마세요.");
+      });
+      const part = tokensToSegments(tokens, offset);
+      for (const seg of part) offset = Math.max(offset, Number(seg.speaker));
+      built.push.apply(built, part);
+    }
+  } catch (err) {
+    setState("재분리 실패", "error");
+    show("재분리에 실패했습니다: " + err.message + " (기존 기록은 그대로입니다)");
+    redoing = false;
+    showRedo();
+    return;
+  }
+
+  segments = built;
+  runBase = segments.length;
+  names = {};      // async numbers speakers afresh; old names would land on the wrong people
+  partial = { src: "", dst: "" };
+  $("speakerList").dataset.ids = "\u0000";
+  redoing = false;
+  setState("정지됨", "");
+  show("화자 재분리를 마쳤습니다. 이름을 다시 지정해 주세요.");
+  render();
+  save();
+  $("export").disabled = !segments.length;
+  showRedo();
+  autoscroll();
+}
+
+$("redo").onclick = redo;
+$("title").oninput = () => scheduleSave();
+
 // --- session -----------------------------------------------------------------
 
 function buildConfig() {
@@ -913,6 +1122,9 @@ async function start() {
   $("test").textContent = "마이크 테스트";
   streaming = true;
   laggy = false;
+  // Keep the sound as well as the transcript. It runs off the same stream and
+  // carries on through a reconnect, so the gap the live path loses is still here.
+  startRecording();
   running(true);
   holdScreen();
   retryWait = 0;
@@ -932,6 +1144,7 @@ function stop() {
     try { sock.send(new ArrayBuffer(0)); } catch (err) {}
   }
   releaseScreen();
+  stopRecording();          // before closeAudio: it needs the stream still open
   closeAudio();
   running(false);
   setState("정지됨", "");
@@ -952,7 +1165,7 @@ function elapsedSoFar() {
 function running(on) {
   $("start").disabled = on;
   $("stop").disabled = !on;
-  for (const id of ["source", "device", "spoken", "target", "terms", "test", "clear"]) {
+  for (const id of ["source", "device", "spoken", "target", "terms", "test", "clear", "redo"]) {
     $(id).disabled = on;
   }
   if (on) {
@@ -1018,6 +1231,8 @@ $("clear").onclick = () => {
   }
   clearTimeout(saveTimer); saveTimer = null;
   segments = []; runBase = 0; partial = { src: "", dst: "" }; names = {};
+  recordings = []; recordedMs = 0;
+  $("title").value = "";
   lastSpeaker = "1"; elapsedBase = 0; exported = true;
   $("clock").textContent = "00:00:00";
   $("export").disabled = true;
@@ -1025,31 +1240,62 @@ $("clear").onclick = () => {
   // matches, and an empty roster joins to "".
   $("speakerList").dataset.ids = "\u0000";
   render();
+  showRedo();
   try { localStorage.removeItem(STORE); } catch (err) {}
   show("기록을 지웠습니다.");
 };
 
+// Windows rejects these outright and the rest travel badly between systems.
+const BAD_IN_NAMES = /[\\/:*?"<>|\x00-\x1f]/g;
+
+function meetingFileStem() {
+  const now = new Date();
+  const two = (n) => String(n).padStart(2, "0");
+  // Local YYMMDD, not the ISO string: that is UTC, and an evening meeting would
+  // be filed under the next day.
+  const stamp = two(now.getFullYear() % 100) + two(now.getMonth() + 1) + two(now.getDate());
+  const title = $("title").value.replace(BAD_IN_NAMES, "").trim().replace(/\s+/g, " ");
+  return stamp + "_" + (title || "회의기록");
+}
+
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob(["\ufeff" + text], { type }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  // Revoking immediately can cancel the download on some builds.
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
 $("export").onclick = () => {
   const mode = $("exportMode").value;
   const label = { both: "원문 + 번역", src: "원문", dst: "번역" }[mode];
-  const lines = ["# 회의 기록", "", "_" + label + "_", ""];
+  const title = $("title").value.trim() || "회의 기록";
+
+  const md = ["# " + title, "", "_" + label + "_", ""];
+  const txt = [title, "(" + label + ")", ""];
+
   let shown = null;
   for (const block of segments) {
     if (block.speaker !== shown) {
       shown = block.speaker;
-      lines.push("### " + speakerLabel(shown), "");
+      md.push("### " + speakerLabel(shown), "");
+      txt.push("[" + speakerLabel(shown) + "]");
     }
-    if (mode !== "dst" && block.src) lines.push(block.src, "");
-    if (mode !== "src" && block.dst) lines.push(mode === "dst" ? block.dst : "> " + block.dst, "");
+    if (mode !== "dst" && block.src) { md.push(block.src, ""); txt.push(block.src); }
+    if (mode !== "src" && block.dst) {
+      md.push(mode === "dst" ? block.dst : "> " + block.dst, "");
+      txt.push(block.dst);
+    }
+    txt.push("");
   }
+
   exported = true;
-  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "");
-  const url = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/markdown" }));
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "transcript-" + mode + "-" + stamp + ".md";
-  a.click();
-  URL.revokeObjectURL(url);
+  const stem = meetingFileStem();
+  download(stem + ".md", md.join("\n"), "text/markdown;charset=utf-8");
+  // A beat apart: fired together, the second is dropped as a duplicate click.
+  setTimeout(() => download(stem + ".txt", txt.join("\n"), "text/plain;charset=utf-8"), 400);
 };
 
 // --- API key -----------------------------------------------------------------
@@ -1107,6 +1353,10 @@ $("clock").textContent = hhmmss(elapsedBase);   // restore() may have carried ti
 render();
 listDevices();
 $("target").disabled = !translateOn;
+// A restored meeting is exportable straight away. This used to wait for the
+// next token, so a reload left the button dead with a full transcript on screen.
+$("export").disabled = !segments.length;
+showRedo();
 if (!apiKey) openGate("");
 if (!window.isSecureContext) {
   show("HTTPS가 아니면 마이크를 사용할 수 없습니다. https:// 주소로 열어주세요.");
