@@ -332,43 +332,124 @@ function restore() {
 // translation of that chunk. Switching back to original marks the end of a pair,
 // which is what lets each source line sit directly above its own translation.
 
-function openBlock(speaker) {
-  const last = segments[segments.length - 1];
-  if (last && !last.dst && last.speaker === speaker && segments.length > runBase) return last;
-  const block = { speaker, src: "", dst: "" };
-  segments.push(block);
-  return block;
-}
+// A speaker label on two words is a guess. Soniox decides one within a second of
+// hearing a voice and can never take it back, so a blip mid-sentence used to open
+// a new run, and the first words after a real handover kept the previous name.
+//
+// Nothing goes on screen any later for it, but nothing is *committed* until a
+// sentence closes. The tokens of a sentence are held, each voting for its speaker
+// with the length of voice behind it, and only then is the sentence cut into
+// runs. A run carrying too little voice to be worth believing — under a second
+// and a bit, or a small share of the sentence — is folded into its neighbour,
+// which is where a stray "네" or a late handover lands. A run that holds its own
+// stays: someone genuinely interrupting mid-sentence is not noise.
+
+const MIN_RUN_MS = 1200;        // under this a run has too little voice to trust
+const MIN_RUN_SHARE = 0.35;     // ...unless it is a real share of the sentence
+const MAX_PEND_MS = 30000;      // never hold a sentence open longer than this
+const MS_PER_CHAR = 60;         // stand-in when the tokens carry no timing
+const SENTENCE_END = /[.!?。！？…]["'’”)\]]*\s*$/;
 
 let lastSpeaker = "1";
+let pend = newPend();
+
+function newPend() { return { parts: [], dst: "", ms: 0 }; }
+
+function pendText(p) {
+  let out = "";
+  for (const part of p.parts) out += part.text;
+  return out;
+}
+
+// Adjacent tokens by the same speaker are one run.
+function pendRuns(p) {
+  const runs = [];
+  for (const part of p.parts) {
+    const last = runs[runs.length - 1];
+    if (last && last.who === part.who) { last.text += part.text; last.ms += part.ms; }
+    else runs.push({ who: part.who, text: part.text, ms: part.ms });
+  }
+  return runs;
+}
+
+// Fold away every run too small to believe, smallest first, until only runs that
+// carry their own weight remain.
+function settleRuns(runs, total) {
+  while (runs.length > 1) {
+    let at = -1;
+    for (let i = 0; i < runs.length; i++) {
+      const weak = runs[i].ms < MIN_RUN_MS && runs[i].ms / total < MIN_RUN_SHARE;
+      if (weak && (at < 0 || runs[i].ms < runs[at].ms)) at = i;
+    }
+    if (at < 0) break;
+    // Into the bigger neighbour: it is the one with more voice behind its claim.
+    const before = runs[at - 1], after = runs[at + 1];
+    const into = !before ? after : !after ? before : (before.ms >= after.ms ? before : after);
+    into.text = into === before ? into.text + runs[at].text : runs[at].text + into.text;
+    into.ms += runs[at].ms;
+    runs.splice(at, 1);
+  }
+  return runs;
+}
+
+function pendSpeaker() {
+  if (!pend.parts.length) return lastSpeaker;
+  const runs = settleRuns(pendRuns(pend), pend.ms || 1);
+  let best = runs[0], top = -1;
+  for (const run of runs) if (run.ms > top) { top = run.ms; best = run; }
+  return best.who;
+}
+
+function flushPend() {
+  const text = pendText(pend);
+  if (!text.trim()) { pend = newPend(); return; }
+
+  const runs = settleRuns(pendRuns(pend), pend.ms || 1);
+  runs.forEach((run, i) => {
+    segments.push({
+      speaker: run.who,
+      src: run.text,
+      // One sentence has one translation; it belongs with the last run of it.
+      dst: i === runs.length - 1 ? pend.dst : "",
+    });
+  });
+  lastSpeaker = runs[runs.length - 1].who;
+  pend = newPend();
+}
+
+function sentenceClosed(text) { return SENTENCE_END.test(text); }
 
 function absorb(response) {
-  const pendingSrc = [], pendingDst = [];
+  const live = [], liveDst = [];
   for (const token of response.tokens || []) {
     const text = token.text || "";
     if (!text || MARKERS.has(text.trim())) continue;
     const isTranslation = token.translation_status === "translation";
 
     if (!token.is_final) {
-      (isTranslation ? pendingDst : pendingSrc).push(text);
+      (isTranslation ? liveDst : live).push(text);
       continue;
     }
-    if (isTranslation) {
-      if (!segments.length) segments.push({ speaker: lastSpeaker, src: "", dst: "" });
-      segments[segments.length - 1].dst += text;
-    } else {
-      // Speaker only rides on spoken tokens, and only while diarization is on;
-      // carry the last one forward across the gaps. Normalised to a string: the
-      // field arrives as a number, while ids minted here and used as keys into
-      // `names` are strings, and 2 never matches "2". A falsy check would also
-      // throw away a speaker 0.
-      const sp = token.speaker;
-      if (sp !== undefined && sp !== null && sp !== "") lastSpeaker = String(sp);
-      openBlock(lastSpeaker).src += text;
-    }
+    if (isTranslation) { pend.dst += text; continue; }
+
+    // A spoken token arriving after a translation means the previous chunk closed.
+    // With translation on, that is the only safe place to cut: flushing mid-chunk
+    // would leave its translation to land on the sentence after it.
+    if (pend.dst && sentenceClosed(pendText(pend))) flushPend();
+
+    const sp = token.speaker;
+    if (sp !== undefined && sp !== null && sp !== "") lastSpeaker = String(sp);
+    const ms = (token.start_ms != null && token.end_ms != null)
+      ? Math.max(1, token.end_ms - token.start_ms)
+      : Math.max(1, text.trim().length * MS_PER_CHAR);
+    pend.parts.push({ who: lastSpeaker, text, ms });
+    pend.ms += ms;
+
+    if (!translateOn && sentenceClosed(pendText(pend))) flushPend();
+    else if (pend.ms >= MAX_PEND_MS) flushPend();
   }
-  partial = { src: pendingSrc.join("").trim(), dst: pendingDst.join("").trim() };
-  if (segments.length) exported = false;
+  partial = { src: live.join("").trim(), dst: liveDst.join("").trim() };
+  if (segments.length || pend.parts.length) exported = false;
 }
 
 // --- rendering ---------------------------------------------------------------
@@ -531,7 +612,7 @@ function render() {
   const view = $("view");
   view.innerHTML = "";
 
-  if (!segments.length && !partial.src && !partial.dst) {
+  if (!segments.length && !pend.parts.length && !partial.src && !partial.dst) {
     const hint = document.createElement("div");
     hint.className = "empty";
     hint.innerHTML = "<b>마이크 테스트</b>로 레벨 바가 움직이는지 확인한 뒤<br><b>시작</b>을 누르세요.";
@@ -540,9 +621,15 @@ function render() {
     return;
   }
 
+  // The pending sentence rides along at the end, under whoever is currently
+  // ahead on the vote. Its chip can still change once before the sentence closes.
+  const drawn = pend.parts.length
+    ? segments.concat([{ speaker: pendSpeaker(), src: pendText(pend), dst: pend.dst, open: true }])
+    : segments;
+
   let shown = null;
-  for (let at = 0; at < segments.length; at++) {
-    const block = segments[at];
+  for (let at = 0; at < drawn.length; at++) {
+    const block = drawn[at];
     // One chip per speaker run: a speaker talking for a minute produces many
     // blocks and a chip on each would be noise. The chip carries the index it
     // heads, which is what a correction acts on.
@@ -555,9 +642,14 @@ function render() {
       chip.type = "button";
       chip.style.color = speakerColor(shown);
       chip.textContent = speakerLabel(shown);
-      chip.title = "눌러서 화자 변경";
       const runAt = at;
-      chip.onclick = () => openPicker(chip, runAt);
+      if (block.open) {
+        chip.disabled = true;
+        chip.title = "문장이 끝나면 확정됩니다";
+      } else {
+        chip.title = "눌러서 화자 변경";
+        chip.onclick = () => openPicker(chip, runAt);
+      }
       head.appendChild(chip);
       view.appendChild(head);
     }
@@ -1051,6 +1143,7 @@ async function redo() {
   runBase = segments.length;
   names = {};      // async numbers speakers afresh; old names would land on the wrong people
   partial = { src: "", dst: "" };
+  pend = newPend();
   $("speakerList").dataset.ids = "\u0000";
   redoing = false;
   setState("정지됨", "");
@@ -1149,6 +1242,8 @@ function connect() {
     if (sock !== ws) return;          // a superseded socket closing is not news
     ws = null;
     if (!streaming) return;           // the user pressed 정지
+    flushPend();                      // do not lose the sentence in progress
+    render();
     save();
     retryWait = Math.min(retryWait ? retryWait * 2 : 1000, RETRY_MAX);
     setState("연결 끊김 · 재연결 대기", "error");
@@ -1191,6 +1286,7 @@ function stop() {
     // An empty frame ends the stream; the server flushes and closes.
     try { sock.send(new ArrayBuffer(0)); } catch (err) {}
   }
+  flushPend();              // the closing sentence is still being weighed
   releaseScreen();
   stopRecording();          // before closeAudio: it needs the stream still open
   closeAudio();
@@ -1283,6 +1379,7 @@ $("clear").onclick = () => {
   clearTimeout(saveTimer); saveTimer = null;
   segments = []; runBase = 0; partial = { src: "", dst: "" }; names = {};
   recordings = []; recordedMs = 0;
+  pend = newPend();
   $("title").value = "";
   lastSpeaker = "1"; elapsedBase = 0; exported = true;
   $("clock").textContent = "00:00:00";

@@ -22,7 +22,10 @@ API Keys.
   the two summed. Screen sharing hands back only the tab's own sound, so capturing
   the far end and the person at the keyboard needs both.
 - **Speaker separation** — a rail on the right lists every voice as it appears.
-  Type a name and it applies to everything that speaker already said.
+  Type a name and it applies to everything that speaker already said. A label is
+  committed a sentence at a time rather than a word at a time: the tokens of a
+  sentence vote with the length of voice behind them, and a run too short to be
+  worth believing folds into its neighbour. Tap a speaker chip to correct one.
 - **Sentence pairing** — each line of source sits directly above its own
   translation, rather than two separate walls of text.
 - **Resumes** — stopping, restarting, or losing the connection continues the same
