@@ -18,6 +18,9 @@ API Keys.
 
 ## What it does
 
+- **Both sides of an online meeting** — the microphone, the shared tab's audio, or
+  the two summed. Screen sharing hands back only the tab's own sound, so capturing
+  the far end and the person at the keyboard needs both.
 - **Speaker separation** — a rail on the right lists every voice as it appears.
   Type a name and it applies to everything that speaker already said.
 - **Sentence pairing** — each line of source sits directly above its own

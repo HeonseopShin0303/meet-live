@@ -203,6 +203,7 @@
     <select id="source" title="오디오 소스">
       <option value="mic">🎤 마이크</option>
       <option value="display">🔊 탭·시스템 소리</option>
+      <option value="both">🎤+🔊 마이크 + 탭 소리</option>
     </select>
     <select id="device" title="마이크 장치"></select>
     <select id="spoken" title="화자가 쓰는 언어">
@@ -282,6 +283,7 @@ let ws = null, stream = null, audioCtx = null, node = null, wakeLock = null;
 let testing = false, streaming = false;
 let ticker = null, startedAt = 0, elapsedBase = 0, saveTimer = null;
 let captureRate = RATE, laggy = false;
+let micStream = null, sysStream = null, mixDest = null;
 
 // --- persistence -------------------------------------------------------------
 
@@ -720,19 +722,27 @@ async function listDevices() {
   if (chosen) sel.value = chosen;
 }
 
-async function openAudio() {
-  if (audioCtx) return;
-  if ($("source").value === "display") {
-    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-    stream.getVideoTracks().forEach((t) => t.stop());
-    if (!stream.getAudioTracks().length) {
-      throw new Error("공유 창에서 '시스템 오디오 공유'를 켜야 합니다.");
-    }
-  } else {
-    const id = $("device").value;
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        deviceId: id ? { exact: id } : undefined,
+// Screen sharing hands back the shared tab's own audio and nothing else — the
+// microphone is a separate device and never rides along. An online meeting needs
+// both: the far end arrives through the tab, the person at the keyboard through
+// the mic. So capture each and sum them into one bus.
+async function grabSystem() {
+  // Video is requested because a picker with no video track is refused by some
+  // browsers; it is dropped the moment it arrives.
+  const got = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+  got.getVideoTracks().forEach((t) => t.stop());
+  if (!got.getAudioTracks().length) {
+    got.getTracks().forEach((t) => t.stop());
+    throw new Error("공유 창에서 '시스템 오디오 공유'(탭 오디오 공유)를 켜야 합니다.");
+  }
+  return got;
+}
+
+async function grabMic() {
+  const id = $("device").value;
+  return navigator.mediaDevices.getUserMedia({
+    audio: {
+      deviceId: id ? { exact: id } : undefined,
         // Echo cancellation is the wrong tool here and costs more than it looks.
         // Asking for it puts a phone on its voice-call audio path, which is tuned
         // for a handset held to the face: it favours the near mic and gates away
@@ -742,11 +752,25 @@ async function openAudio() {
         // this: it reshapes voice timbre, and timbre is what the diarizer separates
         // speakers by. Gain control is the mild one — it lifts a distant talker
         // without touching those cues — so it stays.
-        echoCancellation: false, noiseSuppression: false, autoGainControl: true,
-        channelCount: 1,
-      },
-    });
+      echoCancellation: false, noiseSuppression: false, autoGainControl: true,
+      channelCount: 1,
+    },
+  });
+}
+
+async function openAudio() {
+  if (audioCtx) return;
+  const want = $("source").value;
+  // System audio first: it opens a picker, and being sent to it after having
+  // already granted the microphone is the less confusing order to cancel out of.
+  if (want === "display" || want === "both") sysStream = await grabSystem();
+  try {
+    if (want === "mic" || want === "both") micStream = await grabMic();
+  } catch (err) {
+    if (sysStream) { sysStream.getTracks().forEach((t) => t.stop()); sysStream = null; }
+    throw err;
   }
+  stream = micStream || sysStream;
 
   audioCtx = new AudioContext({ sampleRate: RATE });
   const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
@@ -755,7 +779,12 @@ async function openAudio() {
 
   // 16 kHz unless the hardware genuinely runs slower, which nothing does.
   captureRate = Math.min(RATE, audioCtx.sampleRate);
-  node = new AudioWorkletNode(audioCtx, "tap", { processorOptions: { rate: captureRate } });
+  node = new AudioWorkletNode(audioCtx, "tap", {
+    processorOptions: { rate: captureRate },
+    // Tab audio is usually stereo and the mic mono. Fold to one channel here, or
+    // the worklet would read channel 0 and quietly drop half of a stereo source.
+    channelCount: 1, channelCountMode: "explicit", channelInterpretation: "speakers",
+  });
   node.port.onmessage = (e) => {
     const fill = $("meterFill");
     const peak = e.data.peak || 0;
@@ -777,7 +806,23 @@ async function openAudio() {
     }
     ws.send(e.data.pcm.buffer);
   };
-  audioCtx.createMediaStreamSource(stream).connect(node);
+  const mix = audioCtx.createGain();
+  mix.gain.value = 1;
+  for (const src of [micStream, sysStream]) {
+    if (!src) continue;
+    const gain = audioCtx.createGain();
+    // Headroom: two sources at full scale would sum past 1.0 and clip, and
+    // clipping costs the timbre the speaker separation reads.
+    gain.gain.value = micStream && sysStream ? 0.7 : 1;
+    audioCtx.createMediaStreamSource(src).connect(gain).connect(mix);
+  }
+  mix.connect(node);
+
+  // The recorder gets the same mix the transcriber hears, so re-splitting the
+  // speakers later works on both sides of the meeting rather than just the mic.
+  mixDest = audioCtx.createMediaStreamDestination();
+  mix.connect(mixDest);
+
   // A worklet needs a downstream node to be pulled, but the audio must not be
   // played back — that would echo the room. Zero gain keeps it silent.
   const mute = audioCtx.createGain();
@@ -791,7 +836,9 @@ function closeAudio() {
   streaming = false;
   if (node) { node.port.onmessage = null; node.disconnect(); node = null; }
   if (audioCtx) { audioCtx.close(); audioCtx = null; }
-  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  for (const src of [micStream, sysStream]) if (src) src.getTracks().forEach((t) => t.stop());
+  micStream = sysStream = stream = null;
+  mixDest = null;
   $("meterFill").style.width = "0";
 }
 
@@ -847,9 +894,10 @@ function pickMime() {
 
 function startRecording() {
   const mime = pickMime();
-  if (!stream || mime === null) return;
+  const source = mixDest ? mixDest.stream : stream;
+  if (!source || mime === null) return;
   try {
-    recorder = new MediaRecorder(stream,
+    recorder = new MediaRecorder(source,
       mime ? { mimeType: mime, audioBitsPerSecond: 32000 } : undefined);
   } catch (err) { recorder = null; return; }
   const parts = [], type = recorder.mimeType || mime || "audio/webm";
@@ -1219,7 +1267,10 @@ $("xlate").onclick = () => {
   if (streaming) show("번역 설정은 다음 녹음부터 적용됩니다.");
 };
 
-$("source").onchange = () => { if (!streaming) { testing = false; closeAudio(); $("test").textContent = "마이크 테스트"; } };
+$("source").onchange = () => {
+  if (!streaming) { testing = false; closeAudio(); $("test").textContent = "마이크 테스트"; }
+  $("device").disabled = $("source").value === "display";
+};
 $("device").onchange = () => { if (!streaming) { closeAudio(); if (testing) { testing = false; $("test").click(); } } };
 
 $("clear").onclick = () => {
@@ -1353,6 +1404,7 @@ $("clock").textContent = hhmmss(elapsedBase);   // restore() may have carried ti
 render();
 listDevices();
 $("target").disabled = !translateOn;
+$("device").disabled = $("source").value === "display";
 // A restored meeting is exportable straight away. This used to wait for the
 // next token, so a reload left the button dead with a full transcript on screen.
 $("export").disabled = !segments.length;
