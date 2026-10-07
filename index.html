@@ -231,6 +231,7 @@
     </select>
     <button id="export" disabled>기록 저장</button>
     <button id="redo" disabled title="녹음된 소리를 다시 올려 화자를 더 정확히 나눕니다">화자 재분리</button>
+    <button id="folder" title="저장 폴더를 한 번 지정해두면 계속 그곳에 저장됩니다">저장 폴더</button>
     <button id="keyEdit" title="API 키 변경">키</button>
   </div>
 </header>
@@ -960,6 +961,78 @@ function releaseScreen() {
   if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
 }
 
+// --- save folder -------------------------------------------------------------
+// A page cannot be told a path — the browser decides where downloads land. What
+// it can do is take a folder the user grants it once and write straight into it
+// afterwards, which is the difference between a download named for the meeting
+// and the meeting actually filed where it belongs. Only Chromium desktop offers
+// this; everywhere else falls back to an ordinary download.
+
+const FS_DB = "meetLive.fs";
+let saveDir = null;
+
+function fsStore(mode, value) {
+  return new Promise((resolve, reject) => {
+    let open;
+    try { open = indexedDB.open(FS_DB, 1); } catch (err) { return resolve(null); }
+    open.onupgradeneeded = () => open.result.createObjectStore("h");
+    open.onerror = () => resolve(null);
+    open.onsuccess = () => {
+      const db = open.result;
+      let req;
+      try {
+        const tx = db.transaction("h", mode === "get" ? "readonly" : "readwrite");
+        const store = tx.objectStore("h");
+        req = mode === "get" ? store.get("dir") : store.put(value, "dir");
+      } catch (err) { db.close(); return resolve(null); }
+      req.onsuccess = () => { resolve(req.result); db.close(); };
+      req.onerror = () => { resolve(null); db.close(); };
+    };
+  });
+}
+
+function showFolder() {
+  const supported = !!window.showDirectoryPicker;
+  $("folder").textContent = saveDir ? "저장 폴더: " + saveDir.name : "저장 폴더 지정";
+  $("folder").disabled = !supported;
+  if (!supported) {
+    $("folder").textContent = "저장 폴더 (미지원)";
+    $("folder").title = "이 브라우저는 폴더 지정을 지원하지 않습니다. 브라우저의 다운로드 폴더로 저장됩니다.";
+  }
+}
+
+async function pickFolder() {
+  if (!window.showDirectoryPicker) return;
+  let dir;
+  try { dir = await window.showDirectoryPicker({ mode: "readwrite" }); }
+  catch (err) { return; }                       // cancelled
+  saveDir = dir;
+  await fsStore("put", dir);
+  showFolder();
+  show("저장 폴더를 '" + dir.name + "'로 지정했습니다. 기록 저장은 이제 이곳에 들어갑니다.");
+}
+
+// Permission can lapse between sessions; asking again is one click, and must
+// happen off a user gesture, which is why this is only ever called from a click.
+async function usableDir() {
+  if (!saveDir) return null;
+  const opts = { mode: "readwrite" };
+  try {
+    if ((await saveDir.queryPermission(opts)) === "granted") return saveDir;
+    if ((await saveDir.requestPermission(opts)) === "granted") return saveDir;
+  } catch (err) { /* handle went stale, e.g. the folder was removed */ }
+  return null;
+}
+
+async function writeInto(dir, name, text) {
+  const handle = await dir.getFileHandle(name, { create: true });
+  const out = await handle.createWritable();
+  await out.write("\ufeff" + text);             // BOM: Notepad reads Korean as ANSI without it
+  await out.close();
+}
+
+$("folder").onclick = pickFolder;
+
 // --- re-transcription --------------------------------------------------------
 // Live diarization has to name a speaker within a second of hearing them and can
 // never revise; the async model sees the whole recording before it decides, which
@@ -1416,7 +1489,7 @@ function download(name, text, type) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-$("export").onclick = () => {
+$("export").onclick = async () => {
   const mode = $("exportMode").value;
   const label = { both: "원문 + 번역", src: "원문", dst: "번역" }[mode];
   const title = $("title").value.trim() || "회의 기록";
@@ -1439,8 +1512,24 @@ $("export").onclick = () => {
     txt.push("");
   }
 
-  exported = true;
   const stem = meetingFileStem();
+  const dir = await usableDir();
+  let why = "";
+  if (dir) {
+    try {
+      await writeInto(dir, stem + ".md", md.join("\n"));
+      await writeInto(dir, stem + ".txt", txt.join("\n"));
+      exported = true;
+      show("저장했습니다 — " + saveDir.name + " 안에 " + stem + ".md, .txt");
+      return;
+    } catch (err) {
+      why = "폴더에 쓰지 못했습니다 (" + err.message + "). ";
+    }
+  }
+  // Say where it actually went. Leaving the previous run's banner up would claim
+  // the folder took it when the browser's download folder did.
+  show(why + "다운로드 폴더에 저장했습니다 — " + stem + ".md, .txt");
+  exported = true;
   download(stem + ".md", md.join("\n"), "text/markdown;charset=utf-8");
   // A beat apart: fired together, the second is dropped as a duplicate click.
   setTimeout(() => download(stem + ".txt", txt.join("\n"), "text/plain;charset=utf-8"), 400);
@@ -1502,6 +1591,8 @@ render();
 listDevices();
 $("target").disabled = !translateOn;
 $("device").disabled = $("source").value === "display";
+showFolder();
+fsStore("get").then((dir) => { if (dir) { saveDir = dir; showFolder(); } });
 // A restored meeting is exportable straight away. This used to wait for the
 // next token, so a reload left the button dead with a full transcript on screen.
 $("export").disabled = !segments.length;

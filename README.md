@@ -37,6 +37,8 @@ API Keys.
   while the connection was down, since the microphone kept recording through it.
 - **Export** — title the meeting at the top and it is saved as
   `YYMMDD_title.md` and `.txt` together, as source only, translation only, or both.
+  Grant it a folder once and both files are written straight there rather than
+  into the browser's downloads. Chromium desktop only; everywhere else downloads.
 
 ## Installing on a phone
 
